@@ -1,0 +1,7 @@
+services:
+  kamailio:
+    build: .
+    container_name: kamailio
+    ports:
+      - "5066:5066/udp"
+    restart: unless-stopped
