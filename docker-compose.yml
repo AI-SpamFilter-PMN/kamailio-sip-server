@@ -1,7 +1,77 @@
 services:
-  kamailio:
-    build: .
-    container_name: kamailio
-    ports:
-      - "5066:5066/udp"
+  rtpengine:
+    image: drachtio/rtpengine:latest
+    container_name: rtpengine
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_NICE
     restart: unless-stopped
+    volumes:
+      - rtpengine-recordings:/var/spool/rtpengine
+    command:
+      - "rtpengine"
+      - "--interface=${HOST_IP}"
+      - "--listen-ng=127.0.0.1:2223"
+      - "--listen-http=127.0.0.1:8099"
+      - "--port-min=30000"
+      - "--port-max=31000"
+      - "--log-level=6"
+      - "--foreground"
+      - "--recording-dir=/var/spool/rtpengine"
+      - "--recording-method=pcap"
+
+  freeswitch:
+    build:
+      context: .
+      dockerfile: Dockerfile.freeswitch
+    container_name: freeswitch
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - SYS_NICE
+      - SYS_RESOURCE
+    environment:
+      - HOST_IP=${HOST_IP}
+    volumes:
+      - ./recordings:/var/spool/freeswitch/recordings
+      - ./default.xml:/etc/freeswitch/dialplan/default.xml
+
+  kamailio:
+    build:
+      context: .
+      dockerfile: Dockerfile.kamailio
+    container_name: kamailio
+    network_mode: host
+    depends_on:
+      - rtpengine
+      - freeswitch
+    restart: unless-stopped
+    environment:
+      - HOST_IP=${HOST_IP}
+      - DATABASE_URL=${DATABASE_URL}
+
+  audio-transcriber-deepgram:
+    build:
+      context: .
+      dockerfile: Dockerfile.transcriber_deepgram
+    container_name: audio-transcriber-deepgram
+    network_mode: host
+    depends_on:
+      - freeswitch
+    restart: unless-stopped
+    volumes:
+      - ./recordings:/var/spool/freeswitch/recordings
+      - ./transcripts_deepgram:/app/transcripts
+    environment:
+      - RECORDINGS_DIR=/var/spool/freeswitch/recordings
+      - TRANSCRIPTS_DIR=/app/transcripts
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - DEEPGRAM_MODEL=nova-3
+      - DEEPGRAM_LANGUAGE=ar
+      - DATABASE_URL=${DATABASE_URL}
+
+volumes:
+  rtpengine-recordings:
+  whisper-cache:
+  wav2vec-cache:

@@ -1,0 +1,34 @@
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    kamailio \
+    kamailio-extra-modules \
+    kamailio-utils-modules \
+    kamailio-json-modules \
+    kamailio-outbound-modules \
+    kamailio-postgres-modules \
+    ca-certificates \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN echo "=== Checking Kamailio modules ===" && \
+    echo "--- db_postgres.so ---" && \
+    find /usr/lib -name "db_postgres.so" -print && \
+    echo "--- sqlops.so ---" && \
+    find /usr/lib -name "sqlops.so" -print && \
+    echo "--- rtpengine.so ---" && \
+    find /usr/lib -name "rtpengine.so" -print
+
+COPY config/kamailio.cfg.template \
+     /etc/kamailio/kamailio.cfg.template
+
+COPY docker-entrypoint-kamailio.sh \
+     /usr/local/bin/docker-entrypoint.sh
+
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+EXPOSE 5066/udp
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

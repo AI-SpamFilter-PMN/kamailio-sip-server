@@ -1,0 +1,284 @@
+#!KAMAILIO
+
+listen=udp:0.0.0.0:5066 advertise __HOST_IP__:5066
+port=5066
+
+debug=2
+log_stderror=yes
+
+loadmodule "pv.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "usrloc.so"
+loadmodule "registrar.so"
+loadmodule "textops.so"
+loadmodule "xlog.so"
+loadmodule "nathelper.so"
+loadmodule "rtpengine.so"
+loadmodule "siputils.so"
+loadmodule "db_postgres.so"
+loadmodule "sqlops.so"
+
+modparam("usrloc", "db_mode", 0)
+modparam("registrar", "method_filtering", 1)
+modparam("rr", "enable_full_lr", 1)
+modparam("rr", "append_fromtag", 1)
+modparam("registrar", "received_avp", "$avp(received)")
+modparam("nathelper", "received_avp", "$avp(received)")
+
+modparam(
+    "rtpengine",
+    "rtpengine_sock",
+    "udp:127.0.0.1:2223"
+)
+
+modparam(
+    "sqlops",
+    "sqlcon",
+    "cb=>__DATABASE_URL__"
+)
+
+route[CHECK_BLOCKLIST] {
+    $var(caller) = $fU;
+
+    xlog(
+        "L_INFO",
+        "BLOCKLIST CHECK - Caller=$var(caller)\n"
+    );
+
+    if ($var(caller) == "") {
+        xlog(
+            "L_WARN",
+            "Empty Caller ID - allowing call\n"
+        );
+
+        return;
+    }
+
+    $var(caller) = $(var(caller){s.trim});
+
+    sql_query(
+        "cb",
+        "SELECT id FROM public.blocklist WHERE msisdn = '$var(caller)' AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
+        "ra"
+    );
+
+    if ($dbr(ra=>rows) > 0) {
+        xlog(
+            "L_WARN",
+            "BLOCKED - Caller=$var(caller) IS IN BLOCKLIST\n"
+        );
+
+        sql_query(
+            "cb",
+            "INSERT INTO public.calls (source, destination, started_at, ended_at, status) VALUES ('$var(caller)', '$rU', NOW(), NOW(), 'BLOCKED')",
+            "rb"
+        );
+
+        xlog(
+            "L_INFO",
+            "BLOCKED call saved - Caller=$var(caller) Destination=$rU\n"
+        );
+
+        sl_send_reply(
+            "403",
+            "Forbidden - Number Blacklisted"
+        );
+
+        exit;
+    }
+
+    xlog(
+        "L_INFO",
+        "ALLOWED - Caller=$var(caller) NOT IN BLOCKLIST\n"
+    );
+}
+
+onreply_route[HANDLE_RTP_ANSWER] {
+    if (
+        status =~ "(180|183|200)"
+        && has_body("application/sdp")
+    ) {
+        xlog(
+            "L_INFO",
+            "rtpengine_answer() status=$rs Call-ID=$ci\n"
+        );
+
+        rtpengine_answer(
+            "trust-address replace-origin replace-session-connection ICE=remove"
+        );
+    }
+}
+
+request_route {
+    if (!mf_process_maxfwd_header("10")) {
+        sl_send_reply(
+            "483",
+            "Too Many Hops"
+        );
+
+        exit;
+    }
+
+    if (loose_route()) {
+        xlog(
+            "L_INFO",
+            "In-dialog request $rm - Call-ID=$ci\n"
+        );
+
+        if (is_method("BYE")) {
+            xlog(
+                "L_INFO",
+                "RTPengine delete on BYE - Call-ID=$ci\n"
+            );
+
+            rtpengine_delete();
+        }
+        else if (is_method("INVITE")) {
+            xlog(
+                "L_INFO",
+                "Re-INVITE - Call-ID=$ci\n"
+            );
+
+            rtpengine_offer(
+                "trust-address replace-origin replace-session-connection ICE=remove"
+            );
+        }
+
+        t_relay();
+
+        exit;
+    }
+
+    if (is_method("REGISTER")) {
+        if (nat_uac_test("19")) {
+            fix_nated_register();
+
+            xlog(
+                "L_INFO",
+                "NAT detected on REGISTER from $fu\n"
+            );
+        }
+
+        if (save("location")) {
+            xlog(
+                "L_INFO",
+                "REGISTER Success for $fu from $si:$sp\n"
+            );
+        } else {
+            xlog(
+                "L_ERR",
+                "REGISTER Failed for $fu\n"
+            );
+
+            sl_reply_error();
+        }
+
+        exit;
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+
+        if (nat_uac_test("19")) {
+            fix_nated_contact();
+
+            xlog(
+                "L_INFO",
+                "NAT fix applied on INVITE from $fu\n"
+            );
+        }
+
+        if (
+            $Rp == 5066
+            && $si == "__HOST_IP__"
+            && $sp == 5060
+        ) {
+            xlog(
+                "L_INFO",
+                "INVITE from FreeSWITCH for $rU\n"
+            );
+
+            if (!lookup("location")) {
+                xlog(
+                    "L_ERR",
+                    "User $rU NOT registered\n"
+                );
+
+                sl_send_reply(
+                    "404",
+                    "User Not Registered"
+                );
+
+                exit;
+            }
+
+            xlog(
+                "L_INFO",
+                "Destination $rU found\n"
+            );
+
+            t_on_reply("HANDLE_RTP_ANSWER");
+
+            rtpengine_offer(
+                "trust-address replace-origin replace-session-connection ICE=remove"
+            );
+
+            t_relay();
+
+            exit;
+        }
+
+        xlog(
+            "L_INFO",
+            "Incoming client INVITE - Caller=$fU Destination=$rU\n"
+        );
+
+        route(CHECK_BLOCKLIST);
+
+        $ru = "sip:" + $rU + "@__HOST_IP__:5060";
+
+        t_on_reply("HANDLE_RTP_ANSWER");
+
+        xlog(
+            "L_INFO",
+            "Forwarding INVITE to FreeSWITCH: $ru\n"
+        );
+
+        rtpengine_offer(
+            "trust-address replace-origin replace-session-connection ICE=remove"
+        );
+
+        t_relay();
+
+        exit;
+    }
+
+    if (is_method("ACK")) {
+        if (t_check_trans()) {
+            t_relay();
+        }
+
+        exit;
+    }
+
+    if (
+        is_method("BYE")
+        || is_method("CANCEL")
+    ) {
+        rtpengine_delete();
+
+        t_relay();
+
+        exit;
+    }
+
+    sl_send_reply(
+        "501",
+        "Not Implemented"
+    );
+
+    exit;
+}

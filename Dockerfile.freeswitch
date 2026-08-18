@@ -1,0 +1,28 @@
+FROM safarov/freeswitch:latest
+
+RUN mkdir -p /etc/freeswitch && \
+    cp -a /usr/share/freeswitch/conf/vanilla/* /etc/freeswitch/
+RUN sed -i \
+    -e 's|<X-PRE-PROCESS cmd="stun-set" data="external_rtp_ip=stun:stun.freeswitch.org"/>|<X-PRE-PROCESS cmd="set" data="external_rtp_ip=$${local_ip_v4}"/>|' \
+    -e 's|<X-PRE-PROCESS cmd="stun-set" data="external_sip_ip=stun:stun.freeswitch.org"/>|<X-PRE-PROCESS cmd="set" data="external_sip_ip=$${local_ip_v4}"/>|' \
+    /etc/freeswitch/vars.xml
+
+RUN sed -i 's/<param name="context" value="public"\/>/<param name="context" value="default"\/>/' \
+    /etc/freeswitch/sip_profiles/internal.xml
+
+RUN sed -i 's/<param name="auth-calls" value="\$\${internal_auth_calls}"\/>/<param name="auth-calls" value="false"\/>/' \
+    /etc/freeswitch/sip_profiles/internal.xml
+
+RUN sed -i 's/<param name="apply-inbound-acl" value="domains"\/>/<!-- apply-inbound-acl disabled: trusted upstream is Kamailio -->/' \
+    /etc/freeswitch/sip_profiles/internal.xml
+
+RUN sed -i 's/default_password=1234/default_password=ChangeMe_Kamailio_Lab_2026/' \
+    /etc/freeswitch/vars.xml
+
+RUN sed -i 's|<load module="mod_signalwire"/>|<!-- <load module="mod_signalwire"/> -->|' \
+    /etc/freeswitch/autoload_configs/modules.conf.xml
+
+COPY docker-entrypoint-freeswitch.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
